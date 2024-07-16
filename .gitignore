@@ -1,0 +1,23 @@
+# Dependencies
+/node_modules
+
+# Compiled contract artifacts
+/build
+
+# Truffle build and networks file
+truffle-config.js
+truffle.js
+
+# Environment files
+.env
+
+# Secrets
+secrets.json
+
+# IDE and editor directories
+/.idea
+/.vscode
+
+# Operating system files
+.DS_Store
+Thumbs.db
