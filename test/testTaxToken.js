@@ -1,5 +1,6 @@
 const TaxToken = artifacts.require("TaxToken");
 const { time } = require("@openzeppelin/test-helpers");
+const assert = require("chai").assert;
 
 contract("TaxToken", (accounts) => {
   let taxToken;
@@ -70,5 +71,39 @@ contract("TaxToken", (accounts) => {
         );
       }
     });
+  });
+
+  describe("Automated Tax Distribution", () => {
+    it("should automatically distribute tax when upkeep is needed", async () => {
+      await taxToken.buyTokens({
+        from: user1,
+        value: web3.utils.toWei("5", "ether"),
+      });
+
+      await time.increase(time.duration.weeks(1) + time.duration.seconds(1));
+
+      const performData = web3.utils.randomHex(0);
+      const upkeepNeeded = await taxToken.checkUpkeep("0x");
+      assert.isTrue(upkeepNeeded[0], "Upkeep should be needed");
+
+      await taxToken.performUpkeep(performData);
+
+      const taxDistributedEvent = await taxToken.getPastEvents(
+        "TokensDistributed"
+      );
+      assert.equal(
+        taxDistributedEvent.length,
+        1,
+        "Tax distribution event should be emitted"
+      );
+      const distributionAmount = taxDistributedEvent[0].returnValues.amount;
+      assert.isAbove(
+        parseInt(distributionAmount),
+        0,
+        "Distribution amount should be greater than zero"
+      );
+    });
+
+    it("should test the random selection based on token holdings", async () => {});
   });
 });
