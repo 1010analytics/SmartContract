@@ -5,12 +5,35 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBase.sol";
 import "@chainlink/contracts/src/v0.8/automation/AutomationCompatible.sol";
 
+
+contract PrizeVault {
+    address private owner;
+
+    constructor(address _owner) {
+        owner = _owner;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not authorized");
+        _;
+    }
+
+    function releasePrize(address payable recipient, uint256 amount) external onlyOwner {
+        require(address(this).balance >= amount, "Insufficient funds in vault");
+        (bool sent, ) = recipient.call{value: amount}("");
+        require(sent, "Failed to send prize");
+    }
+
+    receive() external payable {}
+}
+
 contract TaxToken is VRFConsumerBase, ReentrancyGuard, AutomationCompatible {
     uint256 public constant BUY_SELL_TAX_PERCENT = 19;
     uint256 public constant DEV_FEE_PERCENT = 1;
-    uint256 public constant TOKEN_INITIAL_PRICE = 0.01 ether; 
+    uint256 public constant TOKEN_INITIAL_PRICE = 0.01 ether;
+    uint256 public totalTokenSupply;  
     address public devWallet;
-    address public prizeWallet;
+    PrizeVault public prizeVault;
     address[] public tokenHolders;
     mapping(address => uint256) public tokenBalances;
     mapping(bytes32 => bool) public requestRandomnessFulfilled;
@@ -27,29 +50,29 @@ contract TaxToken is VRFConsumerBase, ReentrancyGuard, AutomationCompatible {
         address _linkToken,
         bytes32 _keyHash,
         uint256 _fee,
-        address _devWallet,
-        address _prizeWallet
+        address _devWallet
     ) VRFConsumerBase(_vrfCoordinator, _linkToken) {
         keyHash = _keyHash;
         fee = _fee;
         devWallet = _devWallet;
-        prizeWallet = _prizeWallet;
-        lastDistribution = block.timestamp;
+        prizeVault = new PrizeVault(address(this));
+        totalTokenSupply = 0;  
     }
 
-    function buyTokens() public payable {
+    function buyTokens() public payable nonReentrant {
         require(msg.value >= TOKEN_INITIAL_PRICE, "Minimum token purchase price not met");
         uint256 tax = calculateTax(msg.value);
         uint256 devFee = calculateDevFee(msg.value);
         uint256 tokensToMint = (msg.value - tax - devFee) / TOKEN_INITIAL_PRICE;
 
         tokenBalances[msg.sender] += tokensToMint;
+        totalTokenSupply += tokensToMint;  
         totalTaxCollected += tax;
         if (!isTokenHolder(msg.sender)) {
             tokenHolders.push(msg.sender);
         }
         payable(devWallet).transfer(devFee);
-        payable(prizeWallet).transfer(tax);
+        prizeVault.releasePrize{value: tax}(payable(prizeVault), tax);
     }
 
     function sellTokens(uint256 amount) public nonReentrant {
@@ -62,49 +85,11 @@ contract TaxToken is VRFConsumerBase, ReentrancyGuard, AutomationCompatible {
         uint256 amountAfterTax = totalValue - tax - devFee;
 
         tokenBalances[msg.sender] -= amount;
+        totalTokenSupply -= amount;  
         totalTaxCollected += tax;
         payable(msg.sender).transfer(amountAfterTax);
         payable(devWallet).transfer(devFee);
-        payable(prizeWallet).transfer(tax);
-    }
-
-    function checkUpkeep(bytes calldata ) external view override returns (bool upkeepNeeded, bytes memory performData) {
-        upkeepNeeded = (block.timestamp >= lastDistribution + interval) && (totalTaxCollected > 0) && (LINK.balanceOf(address(this)) >= fee);
-        performData = ""; 
-    }
-
-    function performUpkeep(bytes calldata ) external override {
-        require((block.timestamp >= lastDistribution + interval) && (totalTaxCollected > 0), "Upkeep not needed");
-        distributeTax();
-    }
-
-    function distributeTax() internal {
-        require(LINK.balanceOf(address(this)) >= fee, "Insufficient LINK to request randomness");
-        bytes32 requestId = requestRandomness(keyHash, fee);
-        requestRandomnessFulfilled[requestId] = true;
-        lastDistribution = block.timestamp;
-    }
-
-    function fulfillRandomness(bytes32 requestId, uint256 randomness) internal override {
-        require(requestRandomnessFulfilled[requestId], "Request not found or already fulfilled");
-        address winner = selectRandomWinner(randomness);
-        uint256 taxPool = totalTaxCollected;
-        (bool success, ) = payable(winner).call{value: taxPool}("");
-        require(success, "Failed to transfer tax to winner");
-        emit TokensDistributed(winner, taxPool);
-        totalTaxCollected = 0; 
-    }
-
-    function selectRandomWinner(uint256 randomness) private view returns (address) {
-        uint256 totalWeight = 0;
-        for (uint256 i = 0; i < tokenHolders.length; i++) {
-            
-            totalWeight += tokenBalances[tokenHolders[i]] / 1000;
-            if (randomness % totalWeight < tokenBalances[tokenHolders[i]] / 1000) {
-                return tokenHolders[i];
-            }
-        }
-        revert("Failed to select a winner");
+        prizeVault.releasePrize{value: tax}(payable(prizeVault), tax);
     }
 
     function isTokenHolder(address candidate) private view returns (bool) {
@@ -122,5 +107,16 @@ contract TaxToken is VRFConsumerBase, ReentrancyGuard, AutomationCompatible {
 
     function calculateDevFee(uint256 amount) private pure returns (uint256) {
         return amount * DEV_FEE_PERCENT / 100;
+    }
+
+    function selectRandomWinner(uint256 randomness) private view returns (address) {
+        uint256 totalWeight = 0;
+        for (uint256 i = 0; i < tokenHolders.length; i++) {
+            totalWeight += tokenBalances[tokenHolders[i]] / 1000;
+            if (randomness % totalWeight < tokenBalances[tokenHolders[i]] / 1000) {
+                return tokenHolders[i];
+            }
+        }
+        revert("Failed to select a winner");
     }
 }
