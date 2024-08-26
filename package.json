@@ -9,10 +9,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@chainlink/contracts": "^1.1.1",
     "@openzeppelin/test-helpers": "^0.5.16"
   },
   "devDependencies": {
-    "eth-gas-reporter": "^0.2.27"
+    "@chainlink/contracts": "^1.2.0",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomiclabs/hardhat-ethers": "^2.2.3",
+    "eth-gas-reporter": "^0.2.27",
+    "ethers": "^6.13.2",
+    "hardhat": "^2.22.9"
   }
 }

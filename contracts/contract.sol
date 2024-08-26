@@ -17,14 +17,13 @@ contract PrizeVault {
         _;
     }
 
-    function releasePrize(address payable recipient, uint256 amount) external onlyOwner payable {
-    require(address(this).balance >= amount, "Insufficient funds in vault");
-    (bool sent, ) = recipient.call{value: amount}("");
-    require(sent, "Failed to send prize");
-}
+    function releasePrize(address payable recipient, uint256 amount) external onlyOwner {
+        require(address(this).balance >= amount, "Insufficient funds in vault");
+        (bool sent, ) = recipient.call{value: amount}("");
+        require(sent, "Failed to send prize");
+    }
 
-
-    function emergencyWithdraw(address payable recipient, uint256 amount) external onlyOwner payable {
+    function emergencyWithdraw(address payable recipient, uint256 amount) external onlyOwner {
         require(address(this).balance >= amount, "Insufficient funds");
         (bool sent, ) = recipient.call{value: amount}("");
         require(sent, "Failed to send emergency funds");
@@ -50,7 +49,10 @@ contract TaxToken is VRFConsumerBase, ReentrancyGuard, AutomationCompatible {
     uint256 public totalTaxCollected;
 
     event TokensDistributed(address indexed recipient, uint256 amount);
-    event DebugLog(string message, uint256 value);
+    event PrizeReleased(address indexed winner, uint256 amount);
+    event EmergencyWithdrawal(address indexed recipient, uint256 amount);
+    event TokensPurchased(address indexed buyer, uint256 amount);
+    event TokensSold(address indexed seller, uint256 amount);
 
     constructor(
         address _vrfCoordinator,
@@ -67,27 +69,25 @@ contract TaxToken is VRFConsumerBase, ReentrancyGuard, AutomationCompatible {
     }
 
     function buyTokens() public payable nonReentrant {
-    require(msg.value >= TOKEN_INITIAL_PRICE, "Minimum token purchase price not met");
-    uint256 tax = calculateTax(msg.value);
-    uint256 devFee = calculateDevFee(msg.value);
-    uint256 tokensToMint = (msg.value - tax - devFee) / TOKEN_INITIAL_PRICE;
+        require(msg.value >= TOKEN_INITIAL_PRICE, "Minimum token purchase price not met");
+        uint256 tax = calculateTax(msg.value);
+        uint256 devFee = calculateDevFee(msg.value);
+        uint256 tokensToMint = (msg.value - tax - devFee) / TOKEN_INITIAL_PRICE;
 
-    emit DebugLog("Tokens to Mint:", tokensToMint);
-    emit DebugLog("Total Tax Collected:", totalTaxCollected);
+        require(tokensToMint > 0, "Not enough ether to mint any tokens.");
 
-    require(tokensToMint > 0, "Not enough ether to mint any tokens.");
+        tokenBalances[msg.sender] += tokensToMint;
+        totalTokenSupply += tokensToMint;
+        totalTaxCollected += tax;
 
-    tokenBalances[msg.sender] += tokensToMint;
-    totalTokenSupply += tokensToMint;
-    totalTaxCollected += tax;
+        if (!isTokenHolder(msg.sender)) {
+            tokenHolders.push(msg.sender);
+        }
+        payable(devWallet).transfer(devFee);
+        payable(address(prizeVault)).transfer(tax);
 
-    if (!isTokenHolder(msg.sender)) {
-        tokenHolders.push(msg.sender);
+        emit TokensPurchased(msg.sender, tokensToMint);
     }
-    payable(devWallet).transfer(devFee);
-    payable(address(prizeVault)).transfer(tax);  
-}
-
 
     function sellTokens(uint256 amount) public nonReentrant {
         require(amount > 0, "Cannot sell zero tokens");
@@ -98,23 +98,26 @@ contract TaxToken is VRFConsumerBase, ReentrancyGuard, AutomationCompatible {
         uint256 devFee = calculateDevFee(totalValue);
         uint256 amountAfterTax = totalValue - tax - devFee;
 
-        emit DebugLog("Amount After Tax:", amountAfterTax);
-        emit DebugLog("Total Tax Collected:", totalTaxCollected);
-
         tokenBalances[msg.sender] -= amount;
         totalTokenSupply -= amount;
         totalTaxCollected += tax;
         payable(msg.sender).transfer(amountAfterTax);
         payable(devWallet).transfer(devFee);
-        payable(address(prizeVault)).transfer(tax);  
+        payable(address(prizeVault)).transfer(tax);
+
+        emit TokensSold(msg.sender, amount);
     }
 
     function fulfillRandomness(bytes32 requestId, uint256 randomness) internal override {
-        require(requestRandomnessFulfilled[requestId], "Request not found or already fulfilled");
+        require(!requestRandomnessFulfilled[requestId], "Request already fulfilled");
+        requestRandomnessFulfilled[requestId] = true;
+
         address payable winner = payable(selectRandomWinner(randomness));
         uint256 taxPool = totalTaxCollected;
         prizeVault.releasePrize(winner, taxPool);
         totalTaxCollected = 0;
+
+        emit PrizeReleased(winner, taxPool);
     }
 
     function checkUpkeep(bytes calldata) external view override returns (bool upkeepNeeded, bytes memory) {
@@ -123,22 +126,17 @@ contract TaxToken is VRFConsumerBase, ReentrancyGuard, AutomationCompatible {
     }
 
     function performUpkeep(bytes calldata) external override {
-    emit DebugLog("Perform Upkeep Called", block.timestamp);
-    require(totalTaxCollected > 0, "No tax collected to distribute.");
-    require(block.timestamp >= lastDistribution + interval, "Not enough time has passed.");
-    
-    lastDistribution = block.timestamp;
-    bytes32 requestId = distributeTax();
-    requestRandomnessFulfilled[requestId] = true;
-    emit DebugLog("Tax Distributed", totalTaxCollected);
-}
+        require(totalTaxCollected > 0, "No tax collected to distribute.");
+        require(block.timestamp >= lastDistribution + interval, "Not enough time has passed.");
 
+        lastDistribution = block.timestamp;
+        bytes32 requestId = distributeTax();
+        requestRandomnessFulfilled[requestId] = false;
+    }
 
     function distributeTax() private returns (bytes32) {
-    emit DebugLog("Distribute Tax Called", totalTaxCollected);
-    return requestRandomness(keyHash, fee);
-}
-
+        return requestRandomness(keyHash, fee);
+    }
 
     function isTokenHolder(address candidate) private view returns (bool) {
         for (uint i = 0; i < tokenHolders.length; i++) {
@@ -161,7 +159,13 @@ contract TaxToken is VRFConsumerBase, ReentrancyGuard, AutomationCompatible {
         uint256 totalWeight = 0;
         for (uint256 i = 0; i < tokenHolders.length; i++) {
             totalWeight += tokenBalances[tokenHolders[i]] / 1000;
-            if (randomness % totalWeight < tokenBalances[tokenHolders[i]] / 1000) {
+        }
+
+        uint256 randomWeight = randomness % totalWeight;
+        uint256 cumulativeWeight = 0;
+        for (uint256 i = 0; i < tokenHolders.length; i++) {
+            cumulativeWeight += tokenBalances[tokenHolders[i]] / 1000;
+            if (randomWeight < cumulativeWeight) {
                 return tokenHolders[i];
             }
         }
